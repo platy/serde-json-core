@@ -4,8 +4,8 @@ use super::Error;
 
 /// parses a string
 pub fn parse_string<'a>(buffer: &'a mut [u8], start: usize, end: usize) -> Result<&'a mut str> {
-    let string = str::from_utf8_mut(&mut buffer[start..end]).map_err(|_| Error::InvalidUnicodeCodePoint)?;
-    mutate(string)
+    let unescaped_bytes = mutate(&mut buffer[start..end])?;
+    str::from_utf8_mut(unescaped_bytes).map_err(|_| Error::InvalidUnicodeCodePoint)
 }
 
 /// Unescapes a JSON string in place, returning a new slice which may be shorter than the input
@@ -17,41 +17,37 @@ pub fn parse_string<'a>(buffer: &'a mut [u8], start: usize, end: usize) -> Resul
 /// # Panics
 /// * If an unescaped double quote is encountered, this suggests the caller missed the end of the string
 /// * If an escape character is the last character of the string, this suggestes the caller has missed the escape
-/// 
-/// # Unsafe
-/// This function uses unsafe code, 
-fn mutate<'a>(string: &'a mut str) -> Result<&'a mut str> {
+fn mutate<'a>(string: &'a mut [u8]) -> Result<&'a mut [u8]> {
     let mut w = 0;
-    unsafe {
-        let mut r = 0;
-        while r < string.len() {
-            let read_byte = string.as_bytes()[r];
+    let mut r = 0;
+    while r < string.len() {
+        let read_byte = string[r];
+        r += 1;
+        if read_byte == b'\\' { // I believe this is safe to do as the UTF-8 character code for this (5C) is never used as part of another UTF-8 character
+            let escaped_byte = string[r];
             r += 1;
-            if read_byte == b'\\' {
-                let escaped_byte = string.as_bytes()[r];
-                r += 1;
-                match escaped_byte {
-                    b'\\' | b'/' | b'"' => {
-                        let byte = &mut string.as_bytes_mut()[w];
-                        w += 1;
-                        *byte = escaped_byte;
-                    },
-                    b'u' => {
-                        let codepoint = u32::from_str_radix(&string[r..r+4], 16).map_err(|_| Error::InvalidEscape)?;
-                        let codepoint = core::char::from_u32(codepoint).unwrap(); // Should never get an invalid char from 4 hex digits
-                        let encoded_string = codepoint.encode_utf8(&mut string.as_bytes_mut()[w..]);
-                        r += 4;
-                        w += encoded_string.len();
-                    },
-                    _bad_escape => Err(Error::InvalidEscape)?,
-                }
-            } else if read_byte == b'"' {
-                panic!("Unescaped quote in string"); // the caller should have treated this as the end of the string
-            } else {
-                let byte = &mut string.as_bytes_mut()[w];
-                w += 1;
-                *byte = read_byte;
+            match escaped_byte {
+                b'\\' | b'/' | b'"' => {
+                    let byte = &mut string[w];
+                    w += 1;
+                    *byte = escaped_byte;
+                },
+                b'u' => {
+                    let codepoint_string = str::from_utf8(&string[r..r+4]).map_err(|_| Error::InvalidEscape)?;
+                    let codepoint = u32::from_str_radix(codepoint_string, 16).map_err(|_| Error::InvalidEscape)?;
+                    let codepoint = core::char::from_u32(codepoint).unwrap(); // Should never get an invalid char from 4 hex digits
+                    let encoded_string = codepoint.encode_utf8(&mut string[w..]);
+                    r += 4;
+                    w += encoded_string.len();
+                },
+                _bad_escape => Err(Error::InvalidEscape)?,
             }
+        } else if read_byte == b'"' {
+            panic!("Unescaped quote in string"); // the caller should have treated this as the end of the string
+        } else {
+            let byte = &mut string[w];
+            w += 1;
+            *byte = read_byte;
         }
     }
     return Ok(&mut string[0..w])
