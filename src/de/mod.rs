@@ -12,6 +12,9 @@ use self::seq::SeqAccess;
 mod enum_;
 mod map;
 mod seq;
+mod string_unescaper;
+
+pub use string_unescaper::parse_string;
 
 /// Deserialization result
 pub type Result<T> = core::result::Result<T, Error>;
@@ -66,6 +69,9 @@ pub enum Error {
 
     /// JSON has a comma after the last value in an array or map.
     TrailingComma,
+
+    /// Attempted to decode an invalid escape within a string
+    InvalidEscape,
 
     /// Error with a custom message that we had to discard.
     CustomError,

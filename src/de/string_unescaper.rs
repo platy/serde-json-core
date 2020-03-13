@@ -28,9 +28,8 @@ fn mutate<'a>(string: &'a mut [u8]) -> Result<&'a mut [u8]> {
             r += 1;
             match escaped_byte {
                 b'\\' | b'/' | b'"' => {
-                    let byte = &mut string[w];
+                    string[w] = escaped_byte;
                     w += 1;
-                    *byte = escaped_byte;
                 },
                 b'u' => {
                     let codepoint_string = str::from_utf8(&string[r..r+4]).map_err(|_| Error::InvalidEscape)?;
@@ -45,9 +44,8 @@ fn mutate<'a>(string: &'a mut [u8]) -> Result<&'a mut [u8]> {
         } else if read_byte == b'"' {
             panic!("Unescaped quote in string"); // the caller should have treated this as the end of the string
         } else {
-            let byte = &mut string[w];
+            string[w] = read_byte;
             w += 1;
-            *byte = read_byte;
         }
     }
     return Ok(&mut string[0..w])
