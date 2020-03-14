@@ -2,116 +2,123 @@ use core::str;
 use super::Result;
 use super::Error;
 
-/// parses a string
-pub fn parse_string<'a>(buffer: &'a mut [u8], start: usize, end: usize) -> Result<&'a mut str> {
-    let unescaped_bytes = mutate(&mut buffer[start..end])?;
-    str::from_utf8_mut(unescaped_bytes).map_err(|_| Error::InvalidUnicodeCodePoint)
-}
-
-/// Unescapes a JSON string in place, returning a new slice which may be shorter than the input
+/// Unescapes a JSON string in place up until the terminating quote, returning the length of the unescaped string from the start of the buffer and the position where parsing should continue
 /// # Errors
 /// `InvalidEscape` when either:
 ///     * an escape character '\' is not followed by one of the accepted JSON escape codes '\', '/', '"', 'u'
 ///     * a unicode escape '\u' is not followed by exactly 4 hex digits
-/// 
-/// # Panics
-/// * If an unescaped double quote is encountered, this suggests the caller missed the end of the string
-/// * If an escape character is the last character of the string, this suggestes the caller has missed the escape
-fn mutate<'a>(string: &'a mut [u8]) -> Result<&'a mut [u8]> {
+/// `EofWhileParsingString` when the buffer end is reached without finding a terminating quote
+pub fn unescape_string_to_termination(buffer: &mut [u8]) -> Result<(usize, usize)> {
     let mut w = 0;
     let mut r = 0;
-    while r < string.len() {
-        let read_byte = string[r];
+    loop {
+        if buffer.len() < r + 1 {
+            return Err(Error::EofWhileParsingString)
+        }
+        let read_byte = buffer[r];
         r += 1;
-        if read_byte == b'\\' { // I believe this is safe to do as the UTF-8 character code for this (5C) is never used as part of another UTF-8 character
-            let escaped_byte = string[r];
+        if read_byte == b'\\' { // I believe this (checking for the escape character in u8s and not worrying about longer characters) is safe to do as the UTF-8 character code for this (5C) is never used as part of another UTF-8 character
+            if buffer.len() < r + 1 {
+                return Err(Error::EofWhileParsingString)
+            }
+            let escaped_byte = buffer[r];
             r += 1;
             match escaped_byte {
                 b'\\' | b'/' | b'"' => {
-                    string[w] = escaped_byte;
+                    buffer[w] = escaped_byte;
                     w += 1;
                 },
                 b'u' => {
-                    let codepoint_string = str::from_utf8(&string[r..r+4]).map_err(|_| Error::InvalidEscape)?;
+                    if buffer.len() < r + 4 {
+                        return Err(Error::EofWhileParsingString)
+                    }
+                    let codepoint_string = str::from_utf8(&buffer[r..r+4]).map_err(|_| Error::InvalidEscape)?;
                     let codepoint = u32::from_str_radix(codepoint_string, 16).map_err(|_| Error::InvalidEscape)?;
                     let codepoint = core::char::from_u32(codepoint).unwrap(); // Should never get an invalid char from 4 hex digits
-                    let encoded_string = codepoint.encode_utf8(&mut string[w..]);
+                    let encoded_string = codepoint.encode_utf8(&mut buffer[w..]);
                     r += 4;
                     w += encoded_string.len();
                 },
                 _bad_escape => Err(Error::InvalidEscape)?,
             }
         } else if read_byte == b'"' {
-            panic!("Unescaped quote in string"); // the caller should have treated this as the end of the string
+            break;
         } else {
-            string[w] = read_byte;
+            buffer[w] = read_byte;
             w += 1;
         }
     }
-    return Ok(&mut string[0..w])
+    return Ok((w, r))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_string;
+    use super::unescape_string_to_termination;
     use super::super::Error;
     use core::convert::TryFrom;
+    use core::str;
+    use super::super::Result;
+
+    /// parses a string
+    fn parse_string<'a>(buffer: &'a mut [u8]) -> Result<(&'a str, usize)> {
+        let (string_end, next) = unescape_string_to_termination(buffer)?;
+        let unescaped = str::from_utf8_mut(&mut buffer[..string_end]).unwrap();
+        Ok((unescaped, next))
+    }
 
     #[test]
     fn unicode() {
-            let mut b: [u8; 4] = <[u8; 4]>::try_from(" ☺".as_bytes()).unwrap();
-            let l = b.len();
-            assert_eq!(parse_string(b.as_mut(), 1, l).unwrap(), "☺");
+            let mut b = <[u8; 5]>::try_from(r#"☺" "#.as_bytes()).unwrap();
+            assert_eq!(parse_string(b.as_mut()).unwrap(), ("☺", 4));
     }
     
     #[test]
     fn escape_literals() {
-        let mut slice = b"  \\\\test\\/\\\" ".clone();
+        let mut slice = b" \\\\test\\/\\\" \" ".clone();
         let l = slice.len();
-        assert_eq!(parse_string(slice.as_mut(), 1, l).unwrap(), " \\test/\" ");
+        assert_eq!(parse_string(slice.as_mut()).unwrap(), (r#" \test/" "#, l-1));
     }
 
     #[test]
     fn escape_unicode() {
-        let mut slice = b" \\u263A".clone();
-        let l = slice.len();
-        assert_eq!(parse_string(slice.as_mut(), 1, l).unwrap(), "☺");
+        let mut slice = b"\\u263A\" ".clone();
+        assert_eq!(parse_string(slice.as_mut()).unwrap(), ("☺", 7));
     }
 
     #[test]
     fn escape_unicode_invalid_hex() {
-        let mut slice = b" \\uASDF".clone();
-        let l = slice.len();
-        assert_eq!(parse_string(slice.as_mut(), 1, l), Err(Error::InvalidEscape));
+        let mut slice = b"\\uASDF".clone();
+        assert_eq!(parse_string(slice.as_mut()), Err(Error::InvalidEscape));
     }
 
     #[test]
     fn escape_unicode_noncharacter() {
-        let mut slice = b" \\uFFFF".clone();
+        let mut slice = b"\\uFFFF\" ".clone();
         let l = slice.len();
-        assert_eq!(parse_string(slice.as_mut(), 1, l).unwrap(), "\u{FFFF}");
+        assert_eq!(parse_string(slice.as_mut()).unwrap(), ("\u{FFFF}", l - 1));
     }
 
     #[test]
     fn escape_invalid() {
-        let mut slice = b" \\E".clone();
-        let l = slice.len();
-        assert_eq!(parse_string(slice.as_mut(), 1, l), Err(Error::InvalidEscape));
+        let mut slice = b"\\E".clone();
+        assert_eq!(parse_string(slice.as_mut()), Err(Error::InvalidEscape));
     }
 
     #[test]
-    #[should_panic]
     fn escape_at_end() {
-        let mut slice = b" \\".clone();
-        let l = slice.len();
-        let _result = parse_string(slice.as_mut(), 1, l);
+        let mut slice = b"\\".clone();
+        assert_eq!(parse_string(slice.as_mut()), Err(Error::EofWhileParsingString));
     }
 
     #[test]
-    #[should_panic]
-    fn unescaped_double_quote() {
-        let mut slice = b" \"".clone();
-        let l = slice.len();
-        let _result = parse_string(slice.as_mut(), 1, l);
+    fn incomplete_unicode_at_end() {
+        let mut slice = b"\\uFFF".clone();
+        assert_eq!(parse_string(slice.as_mut()), Err(Error::EofWhileParsingString));
+    }
+
+    #[test]
+    fn terminates_on_quote() {
+        let mut slice = b"\" ".clone();
+        assert_eq!(parse_string(slice.as_mut()).unwrap(), ("", 1));
     }
 }

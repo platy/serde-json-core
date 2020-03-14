@@ -14,8 +14,6 @@ mod map;
 mod seq;
 mod string_unescaper;
 
-pub use string_unescaper::parse_string;
-
 /// Deserialization result
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -178,18 +176,12 @@ impl<'a> Deserializer<'a> {
 
     fn parse_str(&mut self) -> Result<&'a str> {
         self.consume_passed();
-        loop {
-            match self.peek() {
-                Some(b'"') => {
-                    let string_slice = self.consume_passed();
-                    self.eat_char();
-                    return str::from_utf8(string_slice)
-                        .map_err(|_| Error::InvalidUnicodeCodePoint);
-                }
-                Some(_) => self.eat_char(),
-                None => return Err(Error::EofWhileParsingString),
-            }
-        }
+        let (string_end, quote) = string_unescaper::unescape_string_to_termination(self.slice)?;
+        self.index = string_end;
+        let string_slice = self.consume_passed();
+        self.index = quote - string_end;
+        return str::from_utf8(string_slice)
+            .map_err(|_| Error::InvalidUnicodeCodePoint);
     }
 
     fn consume_passed(&mut self) -> &'a mut [u8] {
@@ -768,6 +760,11 @@ mod tests {
     #[test]
     fn str() {
         assert_eq!(crate::from_str(&mut String::<U64>::from_str(r#" "hello" "#).unwrap()), Ok("hello"));
+    }
+
+    #[test]
+    fn escaped_str() {
+        assert_eq!(crate::from_str(&mut String::<U64>::from_str(r#" "\\test\/\"  \u263A" "#).unwrap()), Ok(r#"\test/"  ☺"#));
     }
 
     #[test]
